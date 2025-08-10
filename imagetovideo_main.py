@@ -63,10 +63,10 @@ def generate_image_video(request: ImageToVideoRequest):
         if not task_status.output:
             raise HTTPException(status_code=500, detail="RunwayML task returned no output.")
 
-        # Extract video URL
-        video_url = task_status.output[0].get("video")
+        # Extract video URL correctly (task_status.output[0] is a string)
+        video_url = task_status.output[0]
         if not video_url:
-            raise HTTPException(status_code=500, detail="RunwayML output missing 'video' key.")
+            raise HTTPException(status_code=500, detail="RunwayML output missing video URL.")
 
         # Download video
         video_response = requests.get(video_url, stream=True)
