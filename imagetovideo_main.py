@@ -37,10 +37,10 @@ class ImageToVideoRequest(BaseModel):
 @app.post("/generate-image-video")
 def generate_image_video(request: ImageToVideoRequest):
     try:
-        # Create the generation task - convert prompt_image to string to avoid serialization errors
+        # Create the generation task
         task = client.image_to_video.create(
             model=request.model,
-            prompt_image=str(request.prompt_image),
+            prompt_image=request.prompt_image,
             prompt_text=request.prompt_text,
             ratio=request.ratio
         )
@@ -60,10 +60,8 @@ def generate_image_video(request: ImageToVideoRequest):
         if not task_status.output:
             raise HTTPException(status_code=500, detail="RunwayML task returned no output.")
 
-        # Extract video URL
-        video_url = task_status.output[0].get("video")
-        if not video_url:
-            raise HTTPException(status_code=500, detail="RunwayML output missing 'video' key.")
+        # Extract video URL - treat output[0] as a string URL directly
+        video_url = task_status.output[0]
 
         # Download video
         video_response = requests.get(video_url, stream=True)
