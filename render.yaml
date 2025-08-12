@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ai-imagetovideogen-backend
+    env: python
+    python_version: 3.12
+    plan: free
+    branch: main
+    build_command: pip install -r requirements.txt
+    start_command: uvicorn imagetovideo_main:app --host 0.0.0.0 --port 11000
