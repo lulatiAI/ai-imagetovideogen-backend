@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 import os
@@ -8,10 +8,10 @@ import requests
 import time
 from runwayml import RunwayML
 import boto3
+import uuid
 
 app = FastAPI()
 
-# Enable CORS for all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,21 +20,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# RunwayML API key
 RUNWAY_API_KEY = os.getenv("RUNWAYML_API_SECRET")
 if not RUNWAY_API_KEY:
     raise RuntimeError("RUNWAYML_API_SECRET environment variable is missing")
 
-# AWS Rekognition & S3 setup
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+
 rekognition = boto3.client(
     "rekognition",
-    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
     region_name=AWS_REGION
 )
 
-# RunwayML client
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION
+)
+
+BUCKET_NAME = "image-to-video-library"
+
 client = RunwayML(api_key=RUNWAY_API_KEY)
 
 class ImageToVideoRequest(BaseModel):
@@ -44,45 +53,66 @@ class ImageToVideoRequest(BaseModel):
     ratio: str = "1280:720"
 
 def is_image_safe(image_url: str) -> bool:
-    """Check image safety using Amazon Rekognition Moderation."""
     try:
-        # Download the image bytes
         img_data = requests.get(image_url).content
-        
         response = rekognition.detect_moderation_labels(
             Image={"Bytes": img_data},
             MinConfidence=80
         )
-
         if response.get("ModerationLabels"):
             print("Image flagged:", response["ModerationLabels"])
-            return False  # Image contains restricted content
+            return False
         return True
-
     except Exception as e:
         print("Rekognition error:", e)
         raise HTTPException(status_code=500, detail=f"Rekognition check failed: {str(e)}")
+
+@app.post("/upload-image")
+async def upload_image(file: UploadFile = File(...)):
+    try:
+        file_extension = file.filename.split('.')[-1].lower()
+        if file_extension not in ["jpg", "jpeg", "png", "gif"]:
+            return JSONResponse(status_code=400, content={"error": "Invalid image format."})
+
+        # Generate a unique file name to avoid collisions
+        unique_filename = f"{uuid.uuid4()}.{file_extension}"
+
+        # Read the file content
+        contents = await file.read()
+
+        # Upload to S3 bucket
+        s3_client.put_object(
+            Bucket=BUCKET_NAME,
+            Key=unique_filename,
+            Body=contents,
+            ContentType=file.content_type,
+            ACL="public-read"  # make it publicly readable
+        )
+
+        # Construct the public URL
+        public_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
+
+        return {"url": public_url}
+
+    except Exception as e:
+        print("Upload error:", e)
+        raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
 @app.post("/generate-image-video")
 def generate_image_video(request: ImageToVideoRequest):
     try:
         prompt_image_str = str(request.prompt_image)
-
-        # Step 1: Check image safety with Rekognition
         if not is_image_safe(prompt_image_str):
             return {"status": "REJECTED", "reason": "Image failed moderation check"}
 
-        # Step 2: Create the RunwayML task
         task = client.image_to_video.create(
             model=request.model,
             prompt_image=prompt_image_str,
             prompt_text=request.prompt_text,
             ratio=request.ratio
         )
-
         task_id = task.id
 
-        # Step 3: Poll for completion
         while True:
             task_status = client.tasks.retrieve(task_id)
             if task_status.status in ["SUCCEEDED", "FAILED"]:
@@ -99,7 +129,6 @@ def generate_image_video(request: ImageToVideoRequest):
         if not video_url:
             raise HTTPException(status_code=500, detail="RunwayML output missing video URL.")
 
-        # Step 4: Download video
         video_response = requests.get(video_url, stream=True)
         video_response.raise_for_status()
 
