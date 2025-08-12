@@ -7,6 +7,7 @@ import tempfile
 import requests
 import time
 from runwayml import RunwayML
+import boto3
 
 app = FastAPI()
 
@@ -19,28 +20,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure API key is set
+# RunwayML API key
 RUNWAY_API_KEY = os.getenv("RUNWAYML_API_SECRET")
 if not RUNWAY_API_KEY:
     raise RuntimeError("RUNWAYML_API_SECRET environment variable is missing")
 
-# Initialize RunwayML client
+# AWS Rekognition & S3 setup
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+rekognition = boto3.client(
+    "rekognition",
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    region_name=AWS_REGION
+)
+
+# RunwayML client
 client = RunwayML(api_key=RUNWAY_API_KEY)
 
-# Request schema
 class ImageToVideoRequest(BaseModel):
     prompt_image: HttpUrl
     prompt_text: str = ""
     model: str = "gen4_turbo"
     ratio: str = "1280:720"
 
+def is_image_safe(image_url: str) -> bool:
+    """Check image safety using Amazon Rekognition Moderation."""
+    try:
+        # Download the image bytes
+        img_data = requests.get(image_url).content
+        
+        response = rekognition.detect_moderation_labels(
+            Image={"Bytes": img_data},
+            MinConfidence=80
+        )
+
+        if response.get("ModerationLabels"):
+            print("Image flagged:", response["ModerationLabels"])
+            return False  # Image contains restricted content
+        return True
+
+    except Exception as e:
+        print("Rekognition error:", e)
+        raise HTTPException(status_code=500, detail=f"Rekognition check failed: {str(e)}")
+
 @app.post("/generate-image-video")
 def generate_image_video(request: ImageToVideoRequest):
     try:
-        # Convert HttpUrl to string explicitly
         prompt_image_str = str(request.prompt_image)
 
-        # Create the generation task
+        # Step 1: Check image safety with Rekognition
+        if not is_image_safe(prompt_image_str):
+            return {"status": "REJECTED", "reason": "Image failed moderation check"}
+
+        # Step 2: Create the RunwayML task
         task = client.image_to_video.create(
             model=request.model,
             prompt_image=prompt_image_str,
@@ -48,14 +80,14 @@ def generate_image_video(request: ImageToVideoRequest):
             ratio=request.ratio
         )
 
-        task_id = task.id  # Store task ID for polling
+        task_id = task.id
 
-        # Poll until task finishes
+        # Step 3: Poll for completion
         while True:
             task_status = client.tasks.retrieve(task_id)
             if task_status.status in ["SUCCEEDED", "FAILED"]:
                 break
-            time.sleep(5)  # Wait before checking again
+            time.sleep(5)
 
         if task_status.status == "FAILED":
             raise HTTPException(status_code=500, detail="RunwayML task failed.")
@@ -63,12 +95,11 @@ def generate_image_video(request: ImageToVideoRequest):
         if not task_status.output:
             raise HTTPException(status_code=500, detail="RunwayML task returned no output.")
 
-        # Extract video URL correctly (task_status.output[0] is a string)
         video_url = task_status.output[0]
         if not video_url:
             raise HTTPException(status_code=500, detail="RunwayML output missing video URL.")
 
-        # Download video
+        # Step 4: Download video
         video_response = requests.get(video_url, stream=True)
         video_response.raise_for_status()
 
@@ -80,8 +111,8 @@ def generate_image_video(request: ImageToVideoRequest):
         return FileResponse(tmp_file.name, media_type="video/mp4", filename="generated_video.mp4")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RunwayML API error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"API error: {str(e)}")
 
 @app.get("/")
 def home():
-    return {"message": "RunwayML Image-to-Video API is running"}
+    return {"message": "RunwayML Image-to-Video API with Rekognition moderation is running"}
