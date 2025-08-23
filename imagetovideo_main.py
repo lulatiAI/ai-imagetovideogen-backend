@@ -12,6 +12,7 @@ import uuid
 
 app = FastAPI()
 
+# Enable CORS for all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,10 +21,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# RunwayML API key
 RUNWAY_API_KEY = os.getenv("RUNWAYML_API_SECRET")
 if not RUNWAY_API_KEY:
     raise RuntimeError("RUNWAYML_API_SECRET environment variable is missing")
 
+# AWS credentials
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -74,22 +77,21 @@ async def upload_image(file: UploadFile = File(...)):
         if file_extension not in ["jpg", "jpeg", "png", "gif"]:
             return JSONResponse(status_code=400, content={"error": "Invalid image format."})
 
-        # Generate a unique file name to avoid collisions
+        # Generate a unique file name
         unique_filename = f"{uuid.uuid4()}.{file_extension}"
 
-        # Read the file content
+        # Read file content
         contents = await file.read()
 
-        # Upload to S3 bucket
+        # Upload to S3 (removed ACL)
         s3_client.put_object(
             Bucket=BUCKET_NAME,
             Key=unique_filename,
             Body=contents,
-            ContentType=file.content_type,
-            ACL="public-read"  # make it publicly readable
+            ContentType=file.content_type
         )
 
-        # Construct the public URL
+        # Construct public URL
         public_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
 
         return {"url": public_url}
